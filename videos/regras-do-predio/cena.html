@@ -1,0 +1,582 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>As 3 Regras do Prédio</title>
+<style>
+  @font-face { font-family: "Oswald"; src: url(fonts/oswald-latin-700-normal.woff2); font-weight: 700; }
+  @font-face { font-family: "Caveat"; src: url(fonts/caveat-latin-700-normal.woff2); font-weight: 700; }
+  @font-face { font-family: "JBMono"; src: url(fonts/jetbrains-mono-latin-500-normal.woff2); font-weight: 500; }
+  html, body { margin: 0; background: #000; }
+  canvas { display: block; width: 360px; height: 640px; }
+</style>
+</head>
+<body>
+<canvas id="c" width="1080" height="1920"></canvas>
+<script>
+// =====================================================================
+//  AS 3 REGRAS DO PRÉDIO — short vertical (1080x1920, 30fps)
+//  Tudo é desenhado em canvas a partir de render(t). O script render.js
+//  chama window.renderFrame(t) quadro a quadro e envia para o ffmpeg.
+//  Abrindo este arquivo no navegador, ele toca em tempo real (preview).
+// =====================================================================
+const W = 1080, H = 1920, DUR = 66.5;
+const c = document.getElementById('c');
+const g = c.getContext('2d');
+
+// ---------- utilitários ----------
+const clamp = (x, a = 0, b = 1) => Math.max(a, Math.min(b, x));
+const lerp = (a, b, t) => a + (b - a) * t;
+const prog = (t, a, b) => clamp((t - a) / (b - a));
+const eOut = t => 1 - Math.pow(1 - clamp(t), 3);
+const eIO = t => { t = clamp(t); return t < .5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2; };
+const back = t => { t = clamp(t); const c1 = 1.9, c3 = c1 + 1; return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2); };
+function rng(s) { return () => { s = (s * 16807) % 2147483647; return (s - 1) / 2147483646; }; }
+function noise1(x) { return Math.sin(x * 1.7) * .5 + Math.sin(x * 3.1 + 1.3) * .3 + Math.sin(x * 7.3 + 4) * .2; }
+
+function rr(x, y, w, h, r, fill) { g.beginPath(); g.roundRect(x, y, w, h, r); g.fillStyle = fill; g.fill(); }
+function rect(x, y, w, h, fill) { g.fillStyle = fill; g.fillRect(x, y, w, h); }
+function circ(x, y, r, fill) { g.beginPath(); g.arc(x, y, r, 0, Math.PI * 2); g.fillStyle = fill; g.fill(); }
+function ell(x, y, rx, ry, fill, rot = 0) { g.beginPath(); g.ellipse(x, y, rx, ry, rot, 0, Math.PI * 2); g.fillStyle = fill; g.fill(); }
+function line(x1, y1, x2, y2, col, w, cap = 'round') { g.beginPath(); g.moveTo(x1, y1); g.lineTo(x2, y2); g.strokeStyle = col; g.lineWidth = w; g.lineCap = cap; g.stroke(); }
+function vgrad(y0, y1, stops) { const gr = g.createLinearGradient(0, y0, 0, y1); stops.forEach(([o, col]) => gr.addColorStop(o, col)); return gr; }
+function spaced(txt, x, y, sp) { // texto com espaçamento entre letras, centralizado
+  let w = 0; for (const ch of txt) w += g.measureText(ch).width + sp; w -= sp;
+  let cx = x - w / 2; const al = g.textAlign; g.textAlign = 'left';
+  for (const ch of txt) { g.fillText(ch, cx, y); cx += g.measureText(ch).width + sp; }
+  g.textAlign = al;
+}
+
+// ---------- grão de filme pré-calculado ----------
+const grains = [];
+for (let k = 0; k < 6; k++) {
+  const cv = document.createElement('canvas'); cv.width = 360; cv.height = 640;
+  const x = cv.getContext('2d'); const im = x.createImageData(360, 640); const r = rng(k * 991 + 7);
+  for (let i = 0; i < im.data.length; i += 4) { const v = r() * 255; im.data[i] = im.data[i + 1] = im.data[i + 2] = v; im.data[i + 3] = 255; }
+  x.putImageData(im, 0, 0); grains.push(cv);
+}
+
+// =====================================================================
+//  ELEMENTOS DE INTERFACE
+// =====================================================================
+function hud(day, time, place, a = 1) {
+  if (a <= 0) return;
+  g.save(); g.globalAlpha = a;
+  rr(48, 150, 430, 128, 14, 'rgba(8,10,14,.72)');
+  g.font = '500 50px JBMono'; g.fillStyle = '#e6e3dc'; g.textAlign = 'left'; g.textBaseline = 'alphabetic';
+  g.fillText(`${day} · ${time}`, 78, 220);
+  g.font = '700 30px Oswald'; g.fillStyle = '#d9662b';
+  let x = 80; for (const ch of place) { g.fillText(ch, x, 258); x += g.measureText(ch).width + 9; }
+  // ponto "gravando"
+  g.restore();
+}
+
+function badge(txt, y, a) {
+  if (a <= 0) return;
+  g.save(); g.globalAlpha = a;
+  const x = 1032, w = 270, h = 74;
+  g.beginPath(); g.roundRect(x - w, y, w, h, 37); g.fillStyle = 'rgba(10,40,25,.75)'; g.fill();
+  g.lineWidth = 5; g.strokeStyle = '#2fbf6a'; g.stroke();
+  g.beginPath(); g.moveTo(x - w + 30, y + 38); g.lineTo(x - w + 46, y + 54); g.lineTo(x - w + 74, y + 20);
+  g.strokeStyle = '#3ddc84'; g.lineWidth = 9; g.lineCap = 'round'; g.lineJoin = 'round'; g.stroke();
+  g.font = '700 40px Oswald'; g.fillStyle = '#f2f2f2'; g.textAlign = 'left'; g.textBaseline = 'middle';
+  g.fillText(txt, x - w + 92, y + h / 2 + 2);
+  g.restore();
+}
+
+// ---------- legendas ----------
+const CAPS = [
+  [4.2, 7.0, 'O SÍNDICO COLOU UM PAPEL NO ELEVADOR'],
+  [7.0, 9.6, 'COM TRÊS REGRAS.', '#f2b632'],
+  [9.6, 12.2, 'QUEM QUEBRA UMA NÃO VÊ O DIA SEGUINTE.'],
+  [12.4, 16.4, 'UM: DEPOIS QUE ESCURECER, NÃO USE A ESCADA.'],
+  [16.6, 19.0, 'DOIS: SE BATEREM NA PORTA, CONTE.'],
+  [19.0, 21.2, 'MORADOR BATE TRÊS VEZES.', '#f2b632'],
+  [21.3, 24.8, 'TRÊS: NUNCA ACENDA A LUZ DA JANELA.'],
+  [25.3, 27.2, 'ONZE DA NOITE.'],
+  [27.2, 29.6, 'BATERAM NA PORTA.', '#ff5a4f'],
+  [29.6, 31.0, 'UMA. DUAS. TRÊS.'],
+  [31.3, 33.9, 'TRÊS BATIDAS. IGUAL MORADOR.'],
+  [34.0, 37.7, '— LIA, É A MAMÃE. ABRE.', '#f2b632'],
+  [38.3, 41.2, 'A MÃE DELA TINHA SAÍDO PRA BUSCAR REMÉDIO...'],
+  [41.2, 43.8, 'FAZ DOIS DIAS.', '#ff5a4f'],
+  [44.3, 46.9, 'PELO OLHO MÁGICO, ERA ELA.'],
+  [46.9, 49.9, 'BONÉ, BOLSA... TUDO IGUAL.'],
+  [50.3, 52.4, 'MAS A MÃE LEVOU A CHAVE.', '#f2b632'],
+  [56.3, 58.3, 'E POR BAIXO DA PORTA...'],
+  [58.3, 60.8, 'TINHA QUATRO PÉS.', '#ff5a4f'],
+  [62.6, 66.3, 'COMENTA AÍ. A PARTE 2 DEPENDE DE VOCÊ.'],
+];
+function wrap(txt, maxW) {
+  const words = txt.split(' '); const lines = []; let cur = '';
+  for (const w of words) { const tryL = cur ? cur + ' ' + w : w; if (g.measureText(tryL).width > maxW && cur) { lines.push(cur); cur = w; } else cur = tryL; }
+  if (cur) lines.push(cur); return lines;
+}
+function captions(t) {
+  for (const [a, b, txt, col] of CAPS) {
+    if (t < a || t > b) continue;
+    const pin = prog(t, a, a + .16), pout = prog(t, b - .12, b);
+    const s = lerp(.8, 1, back(pin));
+    g.save(); g.globalAlpha = pin * (1 - pout);
+    g.translate(540, 1410); g.scale(s, s);
+    g.font = '700 76px Oswald'; g.textAlign = 'center'; g.textBaseline = 'middle';
+    const lines = wrap(txt, 900); const lh = 100; const y0 = -(lines.length - 1) * lh / 2;
+    lines.forEach((l, i) => {
+      g.lineJoin = 'round'; g.lineWidth = 13; g.strokeStyle = '#000'; g.strokeText(l, 0, y0 + i * lh);
+      g.fillStyle = col || '#ffffff'; g.fillText(l, 0, y0 + i * lh);
+    });
+    g.restore();
+  }
+}
+
+// =====================================================================
+//  PERSONAGENS
+// =====================================================================
+const SKIN = '#8d5a3b', HAIR = '#16110f', SHIRT = '#e8b53a';
+
+// Lia de frente (cabeça), escala livre. mood: 0 calma, 1 assustada
+function liaHead(x, y, s, look = 0, mood = 1, blink = 0, sweat = -1) {
+  g.save(); g.translate(x, y); g.scale(s, s);
+  // coque
+  circ(0, -118, 46, HAIR);
+  circ(0, -150, 8, '#e04f6c');
+  // cabelo atrás
+  ell(0, 6, 112, 112, HAIR);
+  // rosto
+  circ(0, 14, 98, SKIN);
+  // franja
+  g.beginPath(); g.ellipse(0, -36, 104, 62, 0, Math.PI, 0); g.fillStyle = HAIR; g.fill();
+  // orelhas
+  circ(-98, 22, 18, '#7d4d31'); circ(98, 22, 18, '#7d4d31');
+  // bochechas
+  ell(-54, 52, 20, 11, 'rgba(200,90,90,.35)'); ell(54, 52, 20, 11, 'rgba(200,90,90,.35)');
+  // olhos
+  const ew = lerp(14, 20, mood), eh = lerp(14, 22, mood) * (1 - blink);
+  if (eh > 1.5) {
+    ell(-36, 14, ew, eh, '#fff'); ell(36, 14, ew, eh, '#fff');
+    const pr = lerp(9, 7, mood);
+    circ(-36 + look * 7, 16, pr, '#111'); circ(36 + look * 7, 16, pr, '#111');
+    circ(-38 + look * 7, 12, 2.6, '#fff'); circ(34 + look * 7, 12, 2.6, '#fff');
+  } else { line(-50, 14, -22, 14, '#111', 5); line(22, 14, 50, 14, '#111', 5); }
+  // sobrancelhas preocupadas
+  const by = lerp(-14, -22, mood);
+  line(-54, by + 8 * mood, -20, by - 4 * mood, HAIR, 8); line(54, by + 8 * mood, 20, by - 4 * mood, HAIR, 8);
+  // boca
+  g.beginPath();
+  if (mood > .5) { g.moveTo(-22, 66); for (let i = 1; i <= 4; i++) g.lineTo(-22 + i * 11, 66 + (i % 2 ? -6 : 0)); }
+  else { g.moveTo(-18, 62); g.quadraticCurveTo(0, 74, 18, 62); }
+  g.strokeStyle = '#3a1f14'; g.lineWidth = 5; g.lineJoin = 'round'; g.lineCap = 'round'; g.stroke();
+  // gota de suor
+  if (sweat >= 0) {
+    const sy = -20 + sweat * 70;
+    g.beginPath(); g.moveTo(84, sy - 22); g.quadraticCurveTo(70, sy + 4, 84, sy + 10); g.quadraticCurveTo(98, sy + 4, 84, sy - 22);
+    g.fillStyle = 'rgba(170,215,240,.9)'; g.fill();
+  }
+  g.restore();
+}
+
+// Lia de costas, em pé
+function liaBack(x, y, s) {
+  g.save(); g.translate(x, y); g.scale(s, s);
+  rr(-34, -150, 26, 150, 12, '#2c3550'); rr(8, -150, 26, 150, 12, '#2c3550');   // pernas
+  rr(-40, -10, 34, 18, 9, '#ddd'); rr(6, -10, 34, 18, 9, '#ddd');                 // tênis
+  rr(-78, -360, 156, 230, 40, SHIRT);                                             // tronco
+  rr(-108, -340, 34, 170, 17, SHIRT); rr(74, -340, 34, 170, 17, SHIRT);          // braços
+  circ(-91, -168, 18, SKIN); circ(91, -168, 18, SKIN);
+  circ(0, -440, 92, HAIR);                                                       // cabeça (nuca)
+  circ(0, -530, 44, HAIR); circ(0, -556, 8, '#e04f6c');
+  g.restore();
+}
+
+// =====================================================================
+//  CENAS
+// =====================================================================
+let performanceT = 0;
+
+// --- 1. título ---
+function sceneTitle(t) {
+  g.fillStyle = '#050506'; g.fillRect(0, 0, W, H);
+  const rg = g.createRadialGradient(540, 900, 50, 540, 900, 900);
+  rg.addColorStop(0, 'rgba(60,60,70,.35)'); rg.addColorStop(1, 'rgba(0,0,0,0)'); g.fillStyle = rg; g.fillRect(0, 0, W, H);
+  const a1 = eOut(prog(t, .2, 1.0)), a2 = eOut(prog(t, .7, 1.5));
+  g.textAlign = 'center'; g.textBaseline = 'alphabetic';
+  g.save(); g.globalAlpha = a1; g.font = '700 170px Oswald'; g.fillStyle = '#efe9dd';
+  g.fillText('AS 3 REGRAS', 540, 860 - 20 * (1 - a1)); g.restore();
+  g.save(); g.globalAlpha = a2; g.font = '700 170px Oswald'; g.fillStyle = '#f2b632';
+  g.fillText('DO PRÉDIO', 540, 1050 - 20 * (1 - a2)); g.restore();
+  eyes(540, 1300, t, 1.6, 1);
+}
+function eyes(x, y, t, start, s = 1) {
+  const a = eOut(prog(t, start, start + .6)); if (a <= 0) return;
+  const bl = Math.max(0, 1 - Math.abs(((t - start) % 2.6) - 1.9) * 9);
+  g.save(); g.globalAlpha = a; g.translate(x, y); g.scale(s, s);
+  for (const dx of [-42, 42]) {
+    ell(dx, 0, 17, 17 * (1 - bl), '#f4f1ea');
+    if (bl < .7) circ(dx + 2, 1, 7, '#050506');
+  }
+  g.restore();
+}
+
+// --- 2/3. papel de regras ---
+const RULES = [
+  ['Depois que escurecer,', 'não use a escada.'],
+  ['Se baterem na porta, conte.', 'Morador bate três vezes.'],
+  ['Nunca acenda a luz', 'da janela.'],
+];
+const RULE_T = [[12.4, 14.6], [16.6, 19.6], [21.3, 23.0]];
+function drawPaper(t) {
+  // papel em coordenadas locais 900 x 1150
+  g.fillStyle = 'rgba(0,0,0,.35)'; g.fillRect(14, 22, 900, 1150);
+  g.fillStyle = '#e9e5d6'; g.fillRect(0, 0, 900, 1150);
+  const pg = g.createLinearGradient(0, 0, 900, 1150); pg.addColorStop(0, 'rgba(255,255,255,.18)'); pg.addColorStop(1, 'rgba(0,0,0,.10)');
+  g.fillStyle = pg; g.fillRect(0, 0, 900, 1150);
+  for (let y = 236; y < 1120; y += 76) { line(40, y, 870, y, 'rgba(90,110,120,.28)', 2, 'butt'); circ(34, y - 30, 7, '#2a2a2a'); }
+  g.font = '700 78px Caveat'; g.fillStyle = '#262626'; g.textAlign = 'left'; g.textBaseline = 'alphabetic';
+  g.fillText('Regras do prédio', 90, 150);
+  // regras
+  RULES.forEach((ls, i) => {
+    const by = 300 + i * 270;
+    const [a, b] = RULE_T[i];
+    const hl = (t > a - .1 && t < (i === 2 ? 25 : RULE_T[i + 1][0] - .2)) ? eOut(prog(t, a - .1, a + .3)) : 0;
+    if (hl > 0) { g.fillStyle = `rgba(232,196,110,${.45 * hl})`; g.fillRect(70, by - 64, 790, 196); }
+    // caixa
+    g.lineWidth = 5; g.strokeStyle = '#262626'; g.strokeRect(96, by - 44, 48, 48);
+    // texto escrito à mão (revela letra por letra)
+    const full = ls.join('\n'); const n = Math.floor(full.length * prog(t, a, b));
+    const vis = full.slice(0, n).split('\n');
+    g.font = '700 56px Caveat'; g.fillStyle = '#1f1f1f';
+    vis.forEach((l, k) => g.fillText(l, 170, by + k * 76));
+    // ícones
+    const ia = eOut(prog(t, b - .3, b + .3)); if (ia > 0) { g.save(); g.globalAlpha = ia; icon(i, 805, by + 30); g.restore(); }
+  });
+}
+function icon(i, x, y) {
+  g.save(); g.translate(x, y); g.scale(.8, .8);
+  g.strokeStyle = '#2a2a2a'; g.fillStyle = '#2a2a2a'; g.lineWidth = 6; g.lineJoin = 'round'; g.lineCap = 'round';
+  if (i === 0) { // escada com X
+    g.beginPath(); g.moveTo(-60, 50); for (let k = 0; k < 4; k++) { g.lineTo(-60 + k * 30, 50 - k * 28 - 28); g.lineTo(-30 + k * 30, 50 - k * 28 - 28); } g.stroke();
+    line(-70, -70, 70, 60, '#b33a2e', 9); line(70, -70, -70, 60, '#b33a2e', 9);
+  } else if (i === 1) { // porta + toc toc
+    g.strokeRect(-56, -70, 70, 130); circ(2, 0, 6, '#2a2a2a');
+    g.font = '700 30px Caveat'; g.textAlign = 'left'; g.fillText('toc', 26, -40); g.fillText('toc', 34, -6); g.fillText('toc', 26, 28);
+  } else { // janela + lâmpada riscada
+    g.strokeRect(-60, -64, 120, 110); line(0, -64, 0, 46, '#2a2a2a', 5); line(-60, -10, 60, -10, '#2a2a2a', 5);
+    g.fillStyle = 'rgba(20,20,30,.85)'; g.fillRect(-57, -61, 114, 104);
+    circ(28, -36, 12, '#e9e5d6');
+    line(-70, 60, 70, -78, '#b33a2e', 9);
+  }
+  g.restore();
+}
+function sceneRules(t) {
+  // parede do elevador (aço escovado esverdeado)
+  g.fillStyle = vgrad(0, H, [[0, '#435a5b'], [1, '#1f2c2f']]); g.fillRect(0, 0, W, H);
+  for (let x = 0; x < W; x += 270) { rect(x, 0, 4, H, 'rgba(0,0,0,.25)'); rect(x + 4, 0, 2, H, 'rgba(255,255,255,.06)'); }
+  // painel de botões
+  const zoom = eIO(prog(t, 12.0, 13.0));
+  g.save();
+  const camS = lerp(1, 1.0, zoom);
+  // painel some ao dar zoom
+  g.globalAlpha = 1 - zoom;
+  rr(890, 520, 140, 520, 16, '#2b393b'); rr(898, 528, 124, 504, 12, '#33464a');
+  for (let k = 0; k < 6; k++) { circ(960, 590 + k * 78, 26, '#1b2526'); circ(960, 590 + k * 78, 20, k === 3 ? '#e8b53a' : '#8fa3a3');
+    g.font = '700 22px Oswald'; g.fillStyle = '#1b2526'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText(String(6 - k), 960, 591 + k * 78); }
+  g.restore();
+  // papel
+  const drop = eOut(prog(t, 4.0, 4.7));
+  const s0 = .6 + .03 * prog(t, 4, 12);
+  const s = lerp(s0, .9, zoom);
+  const cx = lerp(470, 540, zoom), cy = lerp(800, 850, zoom);
+  g.save(); g.globalAlpha = drop;
+  g.translate(cx, cy - 60 * (1 - drop)); g.rotate(lerp(-.035, -.01, zoom)); g.scale(s * camS, s * camS); g.translate(-450, -575);
+  drawPaper(t);
+  // alfinete
+  circ(820, 60, 34, '#c63a3a'); circ(810, 50, 10, 'rgba(255,255,255,.35)');
+  g.restore();
+  // "3 REGRAS"
+  const p3 = prog(t, 7.4, 7.8), o3 = prog(t, 10.6, 11.2);
+  if (p3 > 0 && o3 < 1) {
+    g.save(); g.globalAlpha = 1 - o3; g.translate(540, 820); g.scale(lerp(1.6, 1, back(p3)), lerp(1.6, 1, back(p3)));
+    g.font = '700 200px Oswald'; g.textAlign = 'center'; g.textBaseline = 'middle';
+    g.shadowColor = 'rgba(0,0,0,.7)'; g.shadowBlur = 40; g.fillStyle = '#e9b23c'; g.fillText('3 REGRAS', 0, 0);
+    g.restore();
+  }
+  hud('DIA 3', '18:40', 'ELEVADOR', eOut(prog(t, 4.3, 4.8)));
+}
+
+// --- 4. quarto ---
+function sceneBedroom(t) {
+  const lt = t - 25;
+  // tremida nas batidas
+  let sh = 0; for (const k of [28.0, 28.55, 29.1]) if (t > k && t < k + .25) sh = (1 - (t - k) / .25) * 14;
+  g.save(); g.translate(Math.sin(t * 90) * sh, Math.cos(t * 77) * sh * .6);
+  const z = 1 + lt * .012; g.translate(540, 960); g.scale(z, z); g.translate(-540, -960);
+  // parede de madeira
+  g.fillStyle = vgrad(0, H, [[0, '#1b2740'], [1, '#111a2c']]); g.fillRect(-60, -60, W + 120, H + 120);
+  for (let x = -60; x < W + 60; x += 64) rect(x, -60, 3, H + 120, 'rgba(0,0,0,.25)');
+  // janela
+  const wx = 600, wy = 260, ww = 330, wh = 380;
+  g.fillStyle = vgrad(wy, wy + wh, [[0, '#0b1222'], [1, '#18233b']]); g.fillRect(wx, wy, ww, wh);
+  for (let i = 0; i < 25; i++) { const r = rng(i + 3); circ(wx + r() * ww, wy + r() * wh * .6, 1.6, 'rgba(255,255,255,.7)'); }
+  circ(wx + 250, wy + 80, 30, '#d8d4c4');
+  // prédios lá fora
+  const bl = [[0, 230, 90], [90, 180, 80], [170, 250, 90], [260, 200, 70]];
+  bl.forEach(([bx, bh, bw]) => { rect(wx + bx, wy + wh - bh + 120, bw, bh, '#0d1424');
+    for (let k = 0; k < 4; k++) rect(wx + bx + 14 + (k % 2) * 34, wy + wh - bh + 140 + Math.floor(k / 2) * 46, 18, 22, k === 1 && bx === 90 ? '#e8b53a' : 'rgba(80,100,140,.25)'); });
+  // esquadria
+  g.lineWidth = 16; g.strokeStyle = '#3b2b22'; g.strokeRect(wx, wy, ww, wh); line(wx + ww / 2, wy, wx + ww / 2, wy + wh, '#3b2b22', 12, 'butt'); line(wx, wy + wh / 2, wx + ww, wy + wh / 2, '#3b2b22', 12, 'butt');
+  // cortinas
+  g.fillStyle = '#6e2626'; g.beginPath(); g.moveTo(wx - 40, wy - 30); g.lineTo(wx + 30, wy - 30); g.lineTo(wx - 4, wy + wh + 40); g.lineTo(wx - 40, wy + wh + 40); g.fill();
+  g.beginPath(); g.moveTo(wx + ww + 40, wy - 30); g.lineTo(wx + ww - 30, wy - 30); g.lineTo(wx + ww + 4, wy + wh + 40); g.lineTo(wx + ww + 40, wy + wh + 40); g.fill();
+  // cama
+  rect(40, 900, 40, 380, '#3a261c');
+  rr(130, 940, 250, 120, 30, '#cfd3d6');
+  const look = t > 28 ? lerp(0, -1, eOut(prog(t, 28, 28.4))) : 0;
+  const mood = t > 28 ? 1 : .2;
+  liaHead(250, 960, .82, look, mood, t < 26.4 && t > 26.25 ? 1 : 0);
+  rr(110, 1010, 860, 230, 34, '#2e5a5b'); rect(110, 1070, 860, 8, 'rgba(0,0,0,.18)');
+  rect(40, 1220, 960, 40, '#3a261c');
+  // chão
+  rect(-60, 1270, W + 120, 800, '#0c111d');
+  g.restore();
+  // TOC TOC TOC
+  [[28.0, 760, 980, -.12], [28.55, 880, 1110, .08], [29.1, 720, 1200, -.04]].forEach(([k, x, y, r]) => {
+    const p = prog(t, k, k + .12), o = prog(t, k + .9, k + 1.3); if (p <= 0 || o >= 1) return;
+    g.save(); g.globalAlpha = 1 - o; g.translate(x, y); g.rotate(r); const s = lerp(1.8, 1, back(p)); g.scale(s, s);
+    g.font = '700 110px Oswald'; g.textAlign = 'center'; g.textBaseline = 'middle';
+    g.lineJoin = 'round'; g.lineWidth = 16; g.strokeStyle = '#000'; g.strokeText('TOC', 0, 0); g.fillStyle = '#f4f1ea'; g.fillText('TOC', 0, 0);
+    g.restore();
+  });
+  hud('DIA 3', '23:12', 'APTO 402', 1);
+  badge('REGRA 1', 150, eOut(prog(t, 25.4, 25.8)));
+  badge('REGRA 3', 240, eOut(prog(t, 25.7, 26.1)));
+}
+
+// --- 5. porta por dentro ---
+function door(x, y, w, h) {
+  rr(x - 30, y - 30, w + 60, h + 30, 6, '#2a1d16');
+  g.fillStyle = vgrad(y, y + h, [[0, '#56392a'], [1, '#3f2a1f']]); g.fillRect(x, y, w, h);
+  g.lineWidth = 6; g.strokeStyle = 'rgba(0,0,0,.25)'; g.strokeRect(x + 50, y + 60, w - 100, h * .38); g.strokeRect(x + 50, y + h * .5, w - 100, h * .42);
+  circ(x + w / 2, y + 250, 16, '#1a1310'); circ(x + w / 2, y + 250, 9, '#7a8a90');   // olho mágico
+  circ(x + w - 60, y + h * .52, 22, '#c9a24a'); rr(x + w - 70, y + h * .52 - 4, 40, 10, 4, '#a8862f'); // maçaneta
+  // corrente
+  rr(x + w - 90, y + h * .36, 30, 50, 6, '#888');
+  g.lineWidth = 4; g.strokeStyle = '#9aa';
+  for (let k = 0; k < 7; k++) { g.beginPath(); g.ellipse(x + w - 100 - k * 22, y + h * .36 + 50 + k * 8, 12, 7, 0, 0, Math.PI * 2); g.stroke(); }
+}
+function sceneDoor(t) {
+  const lt = t - 31;
+  g.fillStyle = vgrad(0, H, [[0, '#121722'], [1, '#0a0d14']]); g.fillRect(0, 0, W, H);
+  const z = 1 + lt * .018; g.save(); g.translate(540, 1000); g.scale(z, z); g.translate(-540, -1000);
+  const dx = 260, dy = 380, dw = 560, dh = 1060;
+  door(dx, dy, dw, dh);
+  // luz por baixo da porta
+  const fl = .85 + .15 * noise1(t * 3);
+  const lg = g.createLinearGradient(0, dy + dh, 0, dy + dh + 260);
+  lg.addColorStop(0, `rgba(240,190,90,${.55 * fl})`); lg.addColorStop(1, 'rgba(240,190,90,0)');
+  g.fillStyle = lg; g.beginPath(); g.moveTo(dx, dy + dh); g.lineTo(dx + dw, dy + dh); g.lineTo(dx + dw + 220, dy + dh + 260); g.lineTo(dx - 220, dy + dh + 260); g.fill();
+  rect(dx, dy + dh - 6, dw, 8, `rgba(255,214,120,${fl})`);
+  // chão
+  rect(0, dy + dh + 2, W, 600, 'rgba(10,12,18,.5)');
+  g.restore();
+  // Lia de costas, se aproximando
+  const walk = eIO(prog(t, 31.2, 35.5));
+  liaBack(540 + 30 * Math.sin(walk * Math.PI), lerp(1880, 1720, walk), lerp(1.25, 1.05, walk));
+  // balão de fala (voz atrás da porta)
+  const pv = prog(t, 34, 34.3);
+  if (pv > 0) {
+    g.save(); g.globalAlpha = pv * (1 - prog(t, 37.5, 37.9)); g.translate(780, 560); g.scale(back(pv), back(pv));
+    rr(-150, -60, 300, 110, 30, '#f4f1ea'); g.beginPath(); g.moveTo(-60, 46); g.lineTo(-110, 110); g.lineTo(-10, 46); g.fill();
+    g.font = '700 54px Caveat'; g.fillStyle = '#222'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText('Lia...', 0, -4);
+    g.restore();
+  }
+  hud('DIA 3', '23:13', 'APTO 402', 1);
+  badge('REGRA 2', 150, eOut(prog(t, 31.5, 31.9)));
+}
+
+// --- 6. close no rosto ---
+function sceneFace(t) {
+  const lt = t - 38;
+  g.fillStyle = vgrad(0, H, [[0, '#141a29'], [1, '#07090f']]); g.fillRect(0, 0, W, H);
+  // luz quente vinda de baixo (da porta)
+  const rg = g.createRadialGradient(540, 1500, 50, 540, 1500, 900); rg.addColorStop(0, 'rgba(240,180,90,.22)'); rg.addColorStop(1, 'rgba(0,0,0,0)');
+  g.fillStyle = rg; g.fillRect(0, 0, W, H);
+  const z = lerp(2.6, 3.0, eIO(prog(t, 38, 44)));
+  rr(540 - 125 * z, 860 + 100 * z, 250 * z, 900, 90, SHIRT);
+  const blink = (t > 39.6 && t < 39.75) ? 1 : 0;
+  const shake = t > 41.2 ? Math.sin(t * 60) * 3 : 0;
+  liaHead(540 + shake, 860, z, lerp(-.3, .4, prog(t, 38.5, 40.5)), 1, blink, prog(t, 40, 43.5));
+  hud('DIA 3', '23:13', 'APTO 402', 1);
+}
+
+// --- 7. olho mágico ---
+function scenePeephole(t) {
+  g.fillStyle = '#000'; g.fillRect(0, 0, W, H);
+  const cx = 540 + noise1(t * .8) * 10, cy = 860 + noise1(t * .7 + 5) * 8, R = 430;
+  g.save(); g.beginPath(); g.arc(cx, cy, R, 0, Math.PI * 2); g.clip();
+  // corredor (perspectiva)
+  g.fillStyle = '#5b5446'; g.fillRect(0, 0, W, H);
+  g.fillStyle = '#4a4438'; g.beginPath(); g.moveTo(cx - R, cy - R); g.lineTo(cx - 160, cy - 200); g.lineTo(cx - 160, cy + 260); g.lineTo(cx - R, cy + R); g.fill();
+  g.beginPath(); g.moveTo(cx + R, cy - R); g.lineTo(cx + 160, cy - 200); g.lineTo(cx + 160, cy + 260); g.lineTo(cx + R, cy + R); g.fill();
+  g.fillStyle = '#332e26'; g.beginPath(); g.moveTo(cx - R, cy + R); g.lineTo(cx - 160, cy + 260); g.lineTo(cx + 160, cy + 260); g.lineTo(cx + R, cy + R); g.fill();
+  rect(cx - 160, cy - 200, 320, 460, '#2b2721');
+  // lâmpada do corredor piscando
+  const fl = (noise1(t * 9) > .55) ? .35 : 1;
+  ell(cx, cy - 330, 70, 18, `rgba(255,226,150,${fl})`);
+  // a "mãe"
+  const breathe = Math.sin(t * 2.2) * 4;
+  const m = { x: cx + 10, y: cy + 60 + breathe };
+  rr(m.x - 170, m.y + 40, 340, 420, 90, '#4f5257');                          // corpo / camiseta cinza
+  line(m.x - 120, m.y + 60, m.x + 110, m.y + 330, '#5a3a24', 22);              // alça da bolsa
+  rr(m.x + 70, m.y + 290, 120, 100, 18, '#6a4328');                            // bolsa
+  circ(m.x, m.y - 70, 118, '#1b1714');                                         // cabeça na sombra
+  g.fillStyle = '#c4622a'; g.beginPath(); g.ellipse(m.x, m.y - 140, 122, 66, 0, Math.PI, 0); g.fill(); // boné
+  rr(m.x - 20, m.y - 152, 170, 26, 13, '#a9521f');                             // aba
+  // brilho nos olhos (aparece no fim)
+  const ge = prog(t, 48.6, 49.2);
+  if (ge > 0) { circ(m.x - 38, m.y - 64, 7 * ge, '#f4f1ea'); circ(m.x + 38, m.y - 64, 7 * ge, '#f4f1ea'); }
+  // vinheta da lente
+  const vg = g.createRadialGradient(cx, cy, R * .45, cx, cy, R); vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(0,0,0,.92)');
+  g.fillStyle = vg; g.fillRect(0, 0, W, H);
+  g.restore();
+  g.beginPath(); g.arc(cx, cy, R, 0, Math.PI * 2); g.lineWidth = 10; g.strokeStyle = '#111'; g.stroke();
+  hud('DIA 3', '23:14', 'APTO 402', 1);
+}
+
+// --- 8. porta-chaves + carta da regra 4 ---
+function sceneKeys(t) {
+  g.fillStyle = vgrad(0, H, [[0, '#1d2637'], [1, '#0d121c']]); g.fillRect(0, 0, W, H);
+  for (let x = 0; x < W; x += 64) rect(x, 0, 3, H, 'rgba(0,0,0,.22)');
+  const z = lerp(1.35, 1.5, eIO(prog(t, 50, 56)));
+  g.save(); g.translate(540, 800); g.scale(z, z); g.translate(-540, -800);
+  // porta-chaves de madeira
+  rr(190, 600, 700, 240, 20, '#6b4a33'); rr(204, 614, 672, 212, 14, '#7a5539');
+  g.font = '700 46px Caveat'; g.fillStyle = '#efe6d2'; g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.fillText('Lia', 380, 650); g.fillText('Mãe', 700, 650);
+  // ganchos
+  for (const hx of [380, 700]) { circ(hx, 680, 12, '#c9c9c9'); line(hx, 680, hx, 712, '#c9c9c9', 9); }
+  // chave da Lia pendurada
+  const sw = Math.sin(t * 2) * .06;
+  g.save(); g.translate(380, 712); g.rotate(sw);
+  g.beginPath(); g.arc(0, 26, 24, 0, Math.PI * 2); g.lineWidth = 7; g.strokeStyle = '#c9c9c9'; g.stroke();
+  rr(-12, 46, 24, 46, 6, '#3d7be0');   // chaveiro azul
+  g.restore();
+  // gancho da mãe: vazio + destaque
+  const hp = eOut(prog(t, 50.6, 51.2));
+  if (hp > 0) { g.beginPath(); g.arc(700, 712, lerp(150, 90, hp), 0, Math.PI * 2); g.lineWidth = 9; g.strokeStyle = `rgba(230,70,60,${hp})`; g.stroke(); }
+  g.restore();
+  // carta REGRA 4
+  const pc = prog(t, 52.4, 52.75);
+  if (pc > 0) {
+    g.fillStyle = `rgba(0,0,0,${.75 * pc})`; g.fillRect(0, 0, W, H);
+    g.save(); g.globalAlpha = pc; g.translate(540, 840); const s = lerp(.85, 1, back(pc)); g.scale(s, s); g.rotate(-.015);
+    g.font = '700 52px Caveat'; g.fillStyle = '#d8d2c2'; g.textAlign = 'center'; g.textBaseline = 'middle';
+    g.fillText('escrito no verso do papel:', 0, -330);
+    g.shadowColor = 'rgba(220,40,40,.6)'; g.shadowBlur = 40;
+    rr(-430, -260, 860, 520, 26, '#121214'); g.shadowBlur = 0;
+    g.beginPath(); g.roundRect(-430, -260, 860, 520, 26); g.lineWidth = 7; g.strokeStyle = '#c0302a'; g.stroke();
+    g.font = '700 92px Oswald'; g.fillStyle = '#c94a40'; spaced('REGRA 4', 0, -150, 26);
+    rect(-330, -80, 660, 3, '#3a3a3a');
+    g.font = '700 100px Oswald'; g.fillStyle = '#ece8df'; g.fillText('QUEM TEM CHAVE', 0, 20);
+    const pr = prog(t, 53.3, 53.5);
+    g.save(); g.translate(0, 150); g.scale(lerp(1.4, 1, back(pr)), lerp(1.4, 1, back(pr))); g.globalAlpha = pc * pr;
+    g.fillStyle = '#e0443a'; g.fillText('NÃO BATE.', 0, 0); g.restore();
+    g.restore();
+  }
+  hud('DIA 3', '23:14', 'APTO 402', 1 - pc * .7);
+}
+
+// --- 9. fresta da porta ---
+function sceneFeet(t) {
+  g.fillStyle = '#07080c'; g.fillRect(0, 0, W, H);
+  let sh = 0; if (t > 58.3 && t < 58.9) sh = (1 - (t - 58.3) / .6) * 18;
+  g.save(); g.translate(Math.sin(t * 95) * sh, Math.cos(t * 83) * sh * .5);
+  const z = lerp(1, 1.1, eIO(prog(t, 56, 61))); g.translate(540, 900); g.scale(z, z); g.translate(-540, -900);
+  // porta (base) vista do chão
+  g.fillStyle = vgrad(0, 860, [[0, '#2a1c15'], [1, '#3b281e']]); g.fillRect(-40, 0, W + 80, 860);
+  rect(-40, 600, W + 80, 10, 'rgba(0,0,0,.3)');
+  // fresta de luz
+  const fy = 860, fh = 46;
+  const lg = g.createLinearGradient(0, fy, 0, fy + fh); lg.addColorStop(0, '#ffd27a'); lg.addColorStop(1, '#d99a3e');
+  g.fillStyle = lg; g.fillRect(-40, fy, W + 80, fh);
+  // sombras dos pés
+  const feet = [[300, 0], [470, 0], [640, 58.3], [800, 58.3]];
+  feet.forEach(([x, k]) => { const a = k ? eOut(prog(t, k - .15, k + .05)) : eOut(prog(t, 56.4, 57.2)); if (a <= 0) return;
+    g.fillStyle = `rgba(10,6,4,${.92 * a})`; g.beginPath(); g.roundRect(x - 62, fy - 2, 124, fh + 4, 10); g.fill(); });
+  // brilho no chão
+  const gl = g.createLinearGradient(0, fy + fh, 0, fy + fh + 600); gl.addColorStop(0, 'rgba(255,200,110,.35)'); gl.addColorStop(1, 'rgba(255,200,110,0)');
+  g.fillStyle = gl; g.fillRect(-40, fy + fh, W + 80, 600);
+  rect(-40, fy + fh, W + 80, 1100, 'rgba(14,12,12,.55)');
+  g.restore();
+  // flash vermelho
+  const rf = prog(t, 58.3, 58.35) * (1 - prog(t, 58.4, 59.6));
+  if (rf > 0) { g.fillStyle = `rgba(160,20,20,${.35 * rf})`; g.fillRect(0, 0, W, H); }
+  hud('DIA 3', '23:15', 'APTO 402', 1);
+}
+
+// --- 10. final ---
+function sceneEnd(t) {
+  g.fillStyle = '#050506'; g.fillRect(0, 0, W, H);
+  const a1 = eOut(prog(t, 61.2, 61.8)), a2 = eOut(prog(t, 61.6, 62.2));
+  g.textAlign = 'center'; g.textBaseline = 'alphabetic';
+  g.save(); g.globalAlpha = a1; g.font = '700 150px Oswald'; g.fillStyle = '#efe9dd'; g.fillText('VOCÊ ABRIA', 540, 700); g.restore();
+  g.save(); g.globalAlpha = a2; g.font = '700 150px Oswald'; g.fillStyle = '#f2b632'; g.fillText('A PORTA?', 540, 870); g.restore();
+  // opções
+  const po = eOut(prog(t, 63.0, 63.5));
+  if (po > 0) {
+    g.save(); g.globalAlpha = po;
+    [['ABRIA', 300, '#2fbf6a'], ['NÃO ABRIA', 770, '#e0443a']].forEach(([txt, x, col]) => {
+      g.beginPath(); g.roundRect(x - 190, 960, 380, 100, 50); g.fillStyle = 'rgba(255,255,255,.04)'; g.fill(); g.lineWidth = 6; g.strokeStyle = col; g.stroke();
+      g.font = '700 52px Oswald'; g.fillStyle = '#f2f2f2'; g.textBaseline = 'middle'; g.fillText(txt, x, 1012);
+    });
+    g.restore();
+  }
+  eyes(540, 1180, t, 61.6, 1);
+}
+
+const SCENES = [
+  [0, 4.0, sceneTitle],
+  [4.0, 25.0, sceneRules],
+  [25.0, 31.0, sceneBedroom],
+  [31.0, 38.0, sceneDoor],
+  [38.0, 44.0, sceneFace],
+  [44.0, 50.0, scenePeephole],
+  [50.0, 56.0, sceneKeys],
+  [56.0, 61.0, sceneFeet],
+  [61.0, DUR, sceneEnd],
+];
+
+function render(t) {
+  performanceT = t;
+  g.setTransform(1, 0, 0, 1, 0, 0); g.globalAlpha = 1; g.shadowBlur = 0;
+  for (const [a, b, fn] of SCENES) {
+    if (t >= a && t < b) {
+      g.save(); fn(t); g.restore();
+      // corte com "piscada" para o preto
+      const k = Math.max(1 - (t - a) / .22, 1 - (b - t) / .22, 0);
+      if (k > 0) { g.fillStyle = `rgba(0,0,0,${clamp(k)})`; g.fillRect(0, 0, W, H); }
+      break;
+    }
+  }
+  captions(t);
+  // vinheta geral
+  const vg = g.createRadialGradient(540, 960, 500, 540, 960, 1250);
+  vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(0,0,0,.6)');
+  g.fillStyle = vg; g.fillRect(0, 0, W, H);
+  // grão
+  g.save(); g.globalAlpha = .07; g.globalCompositeOperation = 'overlay';
+  g.drawImage(grains[Math.floor(t * 24) % grains.length], 0, 0, W, H); g.restore();
+  // fade de saída
+  const fo = prog(t, DUR - .6, DUR); if (fo > 0) { g.fillStyle = `rgba(0,0,0,${fo})`; g.fillRect(0, 0, W, H); }
+}
+
+window.DUR = DUR;
+window.renderFrame = t => render(t);
+window.ready = document.fonts.load('700 50px Oswald').then(() => document.fonts.load('700 50px Caveat')).then(() => document.fonts.load('500 50px JBMono')).then(() => true);
+
+// preview em tempo real quando aberto direto no navegador
+if (!navigator.webdriver) {
+  window.ready.then(() => { const t0 = performance.now(); (function loop() { render(((performance.now() - t0) / 1000) % DUR); requestAnimationFrame(loop); })(); });
+}
+</script>
+</body>
+</html>
